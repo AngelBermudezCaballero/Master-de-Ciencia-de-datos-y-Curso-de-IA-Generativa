@@ -1,0 +1,270 @@
+import pandas as pd
+import numpy as np
+import nltk as nl
+import sklearn.datasets as sk
+import emoji as em
+from emoji import demojize
+from nltk.tokenize import TweetTokenizer 
+from googletrans import Translator
+from textblob import TextBlob
+import string
+from nltk.tokenize import TreebankWordTokenizer
+from nltk.corpus import stopwords
+from nltk.stem.snowball import SnowballStemmer
+import re  #Para unión de palabras funcion sub
+from sklearn.feature_extraction.text import TfidfVectorizer
+from tqdm import tqdm
+from sklearn import svm
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
+
+vectorizer = TfidfVectorizer()
+tokenizer = TweetTokenizer()
+tokenizador = TreebankWordTokenizer()
+stemmer = SnowballStemmer("spanish")
+
+
+def recogidaDeDatos(ruta):
+    try:
+        datosTrain = pd.read_csv(ruta, sep='\t', encoding='utf-8')
+        return datosTrain
+
+    except pd.errors.ParserError as error:
+        print(f"Error : {error}")
+
+def normalizaciondeToken(token):
+    token = token.lower()
+    if token.startswith("@"):
+        return "USER"
+    elif token.startswith("http") or token.startswith("www"):
+        return "Httpurl"
+    elif em.emoji_count(token): # Al ser cualquier token con len = 1 puede coger otros simbolos tamb
+        emojiEsp = em.demojize(token , language='es')  #Traducido correctamente
+        return demojize(token)
+    elif token.isalnum() == False : # eliminamos todos los signos de puntuacion, solo nos quedamos con alfanumericos
+        return None
+    elif token in stopwords.words('spanish'): # eliminamos las stopwords ( sin significado )
+        return None
+    else:
+        token = stemmer.stem(token)
+        return token
+
+def tratamientoDeDatos(datosLeidos):
+
+    print("Comenzamos Normalizacion")
+    filas,columnas = datosLeidos.shape
+    columnaTweet = 2
+
+    for fil in tqdm(range(filas)):
+        for col in range(columnas):
+            #Ahora para acceder al contenido de cada celda usamos la funcion iloc
+            cuadro = datosLeidos.iloc[fil,col]
+            if (col == columnaTweet):
+                listapalabras = tokenizador.tokenize(cuadro) #con esto tokenizo para separar tambien caracteres
+                for contenido in range(len(listapalabras)): # total token 580413
+                    if normalizaciondeToken(listapalabras[contenido]) == None:
+                        listapalabras[contenido] = ""
+                    else:    
+                        listapalabras[contenido] = normalizaciondeToken(listapalabras[contenido])   #corregimos tokens 
+                datosLeidos.iloc[fil,col] = ' '.join(listapalabras)  #como antes hemos dividido con split , ahora tenemos que unir de nuevo con join
+                datosLeidos.iloc[fil, col] = re.sub('\s+', ' ', datosLeidos.iloc[fil, col].strip())
+            
+    #Una vez terminado los bucles ya se escribe en el fichero
+    #datosLeidos.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/datos_normalizados_dev-test.csv', index=False, sep='\t',encoding='utf-8')
+    return datosLeidos
+
+def tratamiento_datos_pd():
+    DiccionarioDatos = {"tweet_id": int,	"tweet_url":"", "tweet_text": "",	"class_label": ""}
+    
+    #df.loc[len(df)] = row_dict
+    #new_row_df = pd.DataFrame(row_dict)
+    #pd.join(df, new_row_df)
+    print("")
+                
+def tf_idf(datosTrain,datosPredecir,idFichero):
+    datos = datosTrain.fillna('') #Para que no de errores por NaN
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(datos.tweet_text)
+    
+    vocabulario = vectorizer.get_feature_names_out() # obtenemos el vocabulario
+    resultados = pd.DataFrame(columns=['Token', 'Resultado']) # dataframe para los resultados bien
+
+    for i, fila in enumerate(X):
+        indices = fila.indices  #indices
+        valores = fila.data  #resultado
+        res_df = pd.DataFrame({'Token': [vocabulario[idx] for idx in indices], 'Resultado': valores})  # 
+        resultados = pd.concat([resultados, res_df], ignore_index=True)
+    
+    print("Comenzamos con el entrenamiento con los modelos")
+
+    datosEtiquetas = datos["class_label"]
+
+    modelosvm,modeloRF,modeloLR,modeloSGD = entrenamientoConModeloTrain(X,datosEtiquetas)
+    
+    #Realizamos la llamada al primer modelo
+    modeloResultadoSVM = modelSvm(modelosvm,X,datosEtiquetas,datosPredecir,idFichero)
+    modeloResultadoRF = modelRF(modeloRF,X,datosEtiquetas,datosPredecir,idFichero)
+    modeloResultadoLogR = modelLogR(modeloLR,X,datosEtiquetas,datosPredecir,idFichero)
+    modeloResultadoLogR = modelSGD(modeloSGD,X,datosEtiquetas,datosPredecir,idFichero)
+
+def entrenamientoConModeloTrain(X,datosEtiquetas):
+    modelsvm = svm.SVC()
+    modelsvm.fit(X, datosEtiquetas)  # modelo svm
+
+    modelRF = RandomForestClassifier()
+    modelRF.fit(X, datosEtiquetas)   # modelo RanmdomForest
+
+    modelLogR = LogisticRegression()
+    modelLogR.fit(X, datosEtiquetas)  # modelo logistic reggression
+
+    modelSGD = SGDClassifier()
+    modelSGD.fit(X, datosEtiquetas)   # modelo SGD
+
+    return modelsvm,modelRF,modelLogR,modelSGD
+
+def modelSvm(model,X, etiquetas,datos,idFichero):
+    vectorizer = TfidfVectorizer()  # EL vectorizador es el que se encarga de pasar a números
+    X = vectorizer.fit_transform(datos.tweet_text)  #Pasar a numeros
+    predicciones = []
+    resultadoFinalPrediccion = 0
+    for index, row in datos.iterrows():
+        listapalabras = tokenizador.tokenize(row['tweet_text']) #ahora debemos unirlo en una unica cadena de string
+        listaUnida = ' '.join(listapalabras)
+        Y = vectorizer.transform([listaUnida])
+        prediction = model.predict(Y)
+        predicciones.append({'tweet_text': row['tweet_text'],'Valor_Real': row['class_label'],'prediction': prediction[0]})
+        if(row['class_label'] == prediction[0]):
+            resultadoFinalPrediccion = resultadoFinalPrediccion +1 
+
+    filas, col = datos.shape
+    resultado = (resultadoFinalPrediccion / filas)*100
+    print(f"El resultado de la prediccion con SVM es : {resultado}%")
+    df_predicciones = pd.DataFrame(predicciones)  # Aqui ya van dentro tanto la linea de texto como la prediccion
+
+    if idFichero == 1:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_train_svm.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 2:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev_svm.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 3:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev-test_svm.csv', sep='\t', index=False, encoding='utf-8')
+
+def modelRF(model,X, etiquetas,datos,idFichero):
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(datos.tweet_text)
+
+    predicciones = []
+    resultadoFinalPrediccion = 0
+    for index, row in datos.iterrows():
+        listapalabras = tokenizador.tokenize(row['tweet_text']) #ahora debemos unirlo en una unica cadena de string
+        listaUnida = ' '.join(listapalabras)
+        Y = vectorizer.transform([listaUnida])
+        prediction = model.predict(Y)
+        predicciones.append({'tweet_text': row['tweet_text'],'Valor_Real': row['class_label'],'prediction': prediction[0]})
+        if(row['class_label'] == prediction[0]):
+            resultadoFinalPrediccion = resultadoFinalPrediccion + 1 
+
+    filas, col = datos.shape
+    resultado = (resultadoFinalPrediccion / filas) * 100
+    print(f"El resultado de la predicción es Random Forest con : {resultado}%")
+
+    df_predicciones = pd.DataFrame(predicciones)
+    if idFichero == 1:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_train_RF.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 2:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev_RF.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 3:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev-test_RF.csv', sep='\t', index=False, encoding='utf-8')
+
+def modelLogR(model,X, etiquetas,datos,idFichero):
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(datos.tweet_text)
+
+    predicciones = []
+    resultadoFinalPrediccion = 0
+    for index, row in datos.iterrows():
+        listapalabras = tokenizador.tokenize(row['tweet_text']) #ahora debemos unirlo en una unica cadena de string
+        listaUnida = ' '.join(listapalabras)
+        Y = vectorizer.transform([listaUnida])
+        prediction = model.predict(Y)
+        predicciones.append({'tweet_text': row['tweet_text'],'Valor_Real': row['class_label'],'prediction': prediction[0]})
+        if(row['class_label'] == prediction[0]):
+            resultadoFinalPrediccion = resultadoFinalPrediccion + 1 
+
+    filas, col = datos.shape
+    resultado = (resultadoFinalPrediccion / filas) * 100
+    print(f"El resultado de la predicción es LogReggresor con : {resultado}%")
+
+    df_predicciones = pd.DataFrame(predicciones)
+    if idFichero == 1:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_train_LogR.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 2:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev_LogR.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 3:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev-test_LogR.csv', sep='\t', index=False, encoding='utf-8')
+
+def modelSGD(model,X, etiquetas,datos,idFichero):
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(datos.tweet_text)
+
+    predicciones = []
+    resultadoFinalPrediccion = 0
+    for index, row in datos.iterrows():
+        listapalabras = tokenizador.tokenize(row['tweet_text']) #ahora debemos unirlo en una unica cadena de string
+        listaUnida = ' '.join(listapalabras)
+        Y = vectorizer.transform([listaUnida])
+        prediction = model.predict(Y)
+        predicciones.append({'tweet_text': row['tweet_text'],'Valor_Real': row['class_label'],'prediction': prediction[0]})
+        if(row['class_label'] == prediction[0]):
+            resultadoFinalPrediccion = resultadoFinalPrediccion + 1 
+
+    filas, col = datos.shape
+    resultado = (resultadoFinalPrediccion / filas) * 100
+    print(f"El resultado de la predicción es SGD con : {resultado}%")
+
+    df_predicciones = pd.DataFrame(predicciones)
+    if idFichero == 1:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_train_SGD.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 2:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev_SGD.csv', sep='\t', index=False, encoding='utf-8')
+    elif idFichero == 3:
+        df_predicciones.to_csv('/home/cib617/CheckThat/ResultadoNormalizacion/resultados_preciccion_dev-test_SGD.csv', sep='\t', index=False, encoding='utf-8')
+
+if __name__ == "__main__":
+
+    #Llamamos a la lectura del archivo
+    rutaArchivoTrain = '/home/cib617/CheckThat/archivosCheckES/CT24_checkworthy_spanish_train.tsv'
+    rutaArhivoDev = '/home/cib617/CheckThat/archivosCheckES/CT24_checkworthy_spanish_dev.tsv'
+    rutaArhivoDev_test = '/home/cib617/CheckThat/archivosCheckES/CT24_checkworthy_spanish_dev-test.tsv'
+
+    #Recogida de los datos 
+    datosRecogidosTrain = recogidaDeDatos(rutaArchivoTrain)
+    datosRecogidosDev = recogidaDeDatos(rutaArhivoDev)
+    datosRecogidosDevTest = recogidaDeDatos(rutaArhivoDev_test)
+    print("Datos leidos correctamente de los 3 archivos")
+
+    #Todos los datos estan correctos comenzamos tratamiento
+    #datosLeidos = tratamientoDeDatos(datosRecogidosDevTest)    # Comentar o descomentar para aumentar tiempo ejecucion , esto normaliza los datos 
+    print("Todos los datos normalizados y almacenados correctamente en los respectivos ficheros")
+
+    print("_______________________________________________________")
+    #Prediccion de los datos con modelos
+    rutaArchivoNormalizadoTrain = '/home/cib617/CheckThat/ResultadoNormalizacion/datos_normalizados.csv'
+    rutaArchivoNormalizadoDev = '/home/cib617/CheckThat/ResultadoNormalizacion/datos_normalizados_dev.csv'
+    rutaArchivoNormalizadoDevTest = '/home/cib617/CheckThat/ResultadoNormalizacion/datos_normalizados_dev-test.csv'
+    
+    print("Comenzamos procesamiento con TFIDF")
+    datosNormalizadosTrain = recogidaDeDatos(rutaArchivoNormalizadoTrain)    # Leemos directamente de los datos normalizados
+    datosNormalizadosDev = recogidaDeDatos(rutaArchivoNormalizadoDev)    # Leemos directamente de los datos normalizados
+    datosNormalizadosDevTest = recogidaDeDatos(rutaArchivoNormalizadoDevTest)    # Leemos directamente de los datos normalizados
+    
+    print("RESULTADOS CON TRAIN")
+    tf_idf(datosNormalizadosTrain,datosNormalizadosTrain,1)
+    print("RESULTADOS CON DEV")
+    tf_idf(datosNormalizadosTrain,datosNormalizadosDev,2)
+    print("RESULTADOS CON DEV-TEST")
+    tf_idf(datosNormalizadosTrain,datosNormalizadosDevTest,3)
+
+    #COMENZAMOS PROCESAMIENTO CON TRANSFORMERS
+    
+    
